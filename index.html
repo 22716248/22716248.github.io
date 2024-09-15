@@ -1,1 +1,571 @@
-Hello World
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Snake Game with Abilities and Online Multiplayer</title>
+<style>
+    body {
+        margin: 0;
+        background: linear-gradient(45deg, #ff9a9e 0%, #fad0c4 100%);
+        animation: backgroundAnimation 10s infinite alternate;
+        font-family: 'Arial', sans-serif;
+        color: #fff;
+    }
+
+    @keyframes backgroundAnimation {
+        0% { background-position: 0% 50%; }
+        100% { background-position: 100% 50%; }
+    }
+
+    #gameContainer {
+        text-align: center;
+        margin-top: 10px;
+    }
+
+    #scoreboard {
+        display: flex;
+        justify-content: space-around;
+        font-size: 20px;
+        margin-bottom: 5px;
+    }
+
+    #scoreboard div {
+        margin: 0 10px;
+    }
+
+    #gameCanvas {
+        background-color: rgba(17, 17, 17, 0.8);
+        border: 2px solid #fff;
+        box-shadow: 0 0 20px rgba(255, 255, 255, 0.5);
+        margin-bottom: 10px;
+    }
+
+    #messages {
+        font-size: 16px;
+        height: 20px;
+        margin-bottom: 10px;
+    }
+
+    #connectionContainer {
+        margin-bottom: 10px;
+    }
+
+    #connectionContainer input {
+        width: 300px;
+    }
+
+    .ability-active {
+        border: 2px solid gold;
+    }
+</style>
+</head>
+<body>
+<div id="gameContainer">
+    <div id="settings">
+        <label for="snakeColor">Choose Snake Color:</label>
+        <input type="color" id="snakeColor" value="#00FF7F">
+        <button id="startButton">Start Game</button>
+    </div>
+    <div id="connectionContainer">
+        <button id="createGameButton">Create Game</button>
+        <button id="joinGameButton">Join Game</button>
+        <input type="text" id="gameCodeInput" placeholder="Enter Game Code">
+        <div id="gameCodeDisplay"></div>
+    </div>
+    <div id="messages"></div>
+    <div id="scoreboard">
+        <div id="player1Score">Player 1 Score: 0</div>
+        <div id="player2Score">Player 2 Score: 0</div>
+        <div id="lives">Lives: 3</div>
+    </div>
+    <canvas id="gameCanvas" width="400" height="400"></canvas>
+</div>
+
+<!-- Include SimplePeer library -->
+<script src="https://unpkg.com/simple-peer@latest/simplepeer.min.js"></script>
+
+<script>
+    // Game variables
+    const canvas = document.getElementById('gameCanvas');
+    const context = canvas.getContext('2d');
+    const gridSize = 20;
+    let snakes = [];
+    let foods = [];
+    let specialFoods = [];
+    let cock = { x: 0, y: 0 };
+    let gameOver = false;
+    let scores = [0, 0];
+    let lives = 3;
+    let isPaused = false;
+    let speed = 100;
+    let abilities = [];
+    let messages = document.getElementById('messages');
+    let playerIndex = 0; // 0 for host, 1 for guest
+
+    // Networking variables
+    let peer;
+    let isHost = false;
+
+    // Initialize the game when 'Start Game' button is clicked
+    document.getElementById('startButton').addEventListener('click', init);
+
+    // Multiplayer buttons
+    document.getElementById('createGameButton').addEventListener('click', createGame);
+    document.getElementById('joinGameButton').addEventListener('click', joinGame);
+
+    function init() {
+        // Reset game variables
+        snakes = [
+            {
+                segments: [{ x: 200, y: 200 }],
+                direction: { x: 1, y: 0 },
+                nextDirection: { x: 1, y: 0 },
+                color: document.getElementById('snakeColor').value,
+                invincible: false,
+                abilityActive: null
+            },
+            {
+                segments: [{ x: 200, y: 240 }],
+                direction: { x: 1, y: 0 },
+                nextDirection: { x: 1, y: 0 },
+                color: '#FF1493',
+                invincible: false,
+                abilityActive: null
+            }
+        ];
+        foods = [];
+        specialFoods = [];
+        abilities = [];
+        scores = [0, 0];
+        lives = 3;
+        isPaused = false;
+        speed = 100;
+        gameOver = false;
+        cock = { x: 0, y: 0 };
+
+        document.getElementById('player1Score').textContent = 'Player 1 Score: 0';
+        document.getElementById('player2Score').textContent = 'Player 2 Score: 0';
+        document.getElementById('lives').textContent = 'Lives: 3';
+
+        placeFood();
+        placeCock();
+        document.addEventListener('keydown', changeDirection);
+
+        if (window.gameInterval) clearInterval(window.gameInterval);
+        if (window.cockInterval) clearInterval(window.cockInterval);
+
+        window.gameInterval = setInterval(gameLoop, speed);
+        window.cockInterval = setInterval(moveCock, 500);
+        setTimeout(spawnSpecialFood, 10000);
+        setTimeout(spawnAbility, 15000);
+    }
+
+    // Networking functions
+    function createGame() {
+        isHost = true;
+        playerIndex = 0;
+        peer = new SimplePeer({ initiator: true, trickle: false });
+        setupPeerEvents();
+    }
+
+    function joinGame() {
+        isHost = false;
+        playerIndex = 1;
+        const gameCode = document.getElementById('gameCodeInput').value;
+        peer = new SimplePeer({ initiator: false, trickle: false });
+        setupPeerEvents();
+        peer.signal(JSON.parse(atob(gameCode)));
+    }
+
+    function setupPeerEvents() {
+        peer.on('signal', data => {
+            if (isHost) {
+                document.getElementById('gameCodeDisplay').textContent = 'Game Code: ' + btoa(JSON.stringify(data));
+            } else {
+                // Do nothing for guest
+            }
+        });
+
+        peer.on('connect', () => {
+            messages.textContent = 'Connected!';
+        });
+
+        peer.on('data', data => {
+            const message = JSON.parse(data);
+            if (message.type === 'stateUpdate') {
+                updateGameState(message.state);
+            } else if (message.type === 'directionUpdate') {
+                snakes[1 - playerIndex].nextDirection = message.direction;
+            }
+        });
+
+        peer.on('error', err => {
+            console.error(err);
+            messages.textContent = 'Connection error.';
+        });
+    }
+
+    function sendGameState() {
+        if (isHost && peer && peer.connected) {
+            const state = {
+                snakes: snakes,
+                foods: foods,
+                specialFoods: specialFoods,
+                cock: cock,
+                scores: scores,
+                abilities: abilities
+            };
+            peer.send(JSON.stringify({ type: 'stateUpdate', state: state }));
+        }
+    }
+
+    function sendDirectionUpdate(direction) {
+        if (peer && peer.connected) {
+            peer.send(JSON.stringify({ type: 'directionUpdate', direction: direction }));
+        }
+    }
+
+    function updateGameState(state) {
+        snakes = state.snakes;
+        foods = state.foods;
+        specialFoods = state.specialFoods;
+        cock = state.cock;
+        scores = state.scores;
+        abilities = state.abilities;
+    }
+
+    // Game loop
+    function gameLoop() {
+        if (gameOver || isPaused) {
+            return;
+        }
+
+        if (isHost) {
+            update();
+            sendGameState();
+        }
+        draw();
+    }
+
+    // Update game state
+    function update() {
+        // Update snakes
+        snakes.forEach((snake, index) => {
+            snake.direction = snake.nextDirection;
+            const head = {
+                x: snake.segments[0].x + snake.direction.x * gridSize,
+                y: snake.segments[0].y + snake.direction.y * gridSize
+            };
+
+            // Wrap around the canvas edges
+            head.x = (head.x + canvas.width) % canvas.width;
+            head.y = (head.y + canvas.height) % canvas.height;
+
+            // Check for collision with own body
+            if (!snake.invincible && snake.segments.some((segment, idx) => idx !== 0 && segment.x === head.x && segment.y === head.y)) {
+                loseLife();
+                return;
+            }
+
+            // Check for collision with the cock
+            if (!snake.invincible && head.x === cock.x && head.y === cock.y) {
+                loseLife();
+                return;
+            }
+
+            // Check for collision with other snake
+            const otherSnake = snakes[1 - index];
+            if (!snake.invincible && otherSnake.segments.some(segment => segment.x === head.x && segment.y === head.y)) {
+                loseLife();
+                return;
+            }
+
+            snake.segments.unshift(head);
+
+            // Check if food is eaten
+            const foodIndex = foods.findIndex(food => food.x === head.x && food.y === head.y);
+            if (foodIndex !== -1) {
+                scores[index] += 10;
+                foods.splice(foodIndex, 1);
+                placeFood();
+                showMessage(`Player ${index + 1} ate food!`);
+            } else {
+                snake.segments.pop();
+            }
+
+            // Check if special food is eaten
+            const specialFoodIndex = specialFoods.findIndex(food => food.x === head.x && food.y === head.y);
+            if (specialFoodIndex !== -1) {
+                scores[index] += 30;
+                specialFoods.splice(specialFoodIndex, 1);
+                showMessage(`Player ${index + 1} ate special food!`);
+            }
+
+            // Check if ability is collected
+            const abilityIndex = abilities.findIndex(ability => ability.x === head.x && ability.y === head.y);
+            if (abilityIndex !== -1) {
+                activateAbility(abilities[abilityIndex], snake);
+                abilities.splice(abilityIndex, 1);
+            }
+        });
+
+        moveCock();
+        updateScores();
+    }
+
+    function loseLife() {
+        lives--;
+        document.getElementById('lives').textContent = 'Lives: ' + lives;
+        showMessage('You lost a life!');
+        if (lives <= 0) {
+            endGame();
+        } else {
+            // Reset snakes' positions
+            snakes[0].segments = [{ x: 200, y: 200 }];
+            snakes[1].segments = [{ x: 200, y: 240 }];
+            snakes[0].direction = { x: 1, y: 0 };
+            snakes[1].direction = { x: 1, y: 0 };
+            snakes[0].nextDirection = { x: 1, y: 0 };
+            snakes[1].nextDirection = { x: 1, y: 0 };
+        }
+    }
+
+    function endGame() {
+        gameOver = true;
+        showMessage('Game Over!');
+        clearInterval(window.gameInterval);
+    }
+
+    function updateScores() {
+        document.getElementById('player1Score').textContent = 'Player 1 Score: ' + scores[0];
+        document.getElementById('player2Score').textContent = 'Player 2 Score: ' + scores[1];
+    }
+
+    function showMessage(msg) {
+        messages.textContent = msg;
+        setTimeout(() => {
+            messages.textContent = '';
+        }, 3000);
+    }
+
+    // Draw everything
+    function draw() {
+        context.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Draw foods
+        foods.forEach(food => {
+            context.fillStyle = 'red';
+            context.beginPath();
+            context.arc(food.x + gridSize / 2, food.y + gridSize / 2, gridSize / 2 - 2, 0, 2 * Math.PI);
+            context.fill();
+        });
+
+        // Draw special foods
+        specialFoods.forEach(food => {
+            context.fillStyle = 'gold';
+            context.beginPath();
+            context.arc(food.x + gridSize / 2, food.y + gridSize / 2, gridSize / 2 - 2, 0, 2 * Math.PI);
+            context.fill();
+        });
+
+        // Draw abilities
+        abilities.forEach(ability => {
+            context.fillStyle = 'blue';
+            context.fillRect(ability.x, ability.y, gridSize - 1, gridSize - 1);
+            context.fillStyle = 'white';
+            context.font = '12px Arial';
+            context.fillText(ability.name.charAt(0), ability.x + 5, ability.y + 15);
+        });
+
+        // Draw cock
+        context.save();
+        context.translate(cock.x + gridSize / 2, cock.y + gridSize / 2);
+        const scale = 1 + 0.1 * Math.sin(Date.now() / 200);
+        context.scale(scale, scale);
+        drawCockShape();
+        context.restore();
+
+        // Draw snakes
+        snakes.forEach(snake => {
+            context.fillStyle = snake.color;
+            if (snake.invincible) {
+                context.strokeStyle = 'gold';
+                context.lineWidth = 2;
+            }
+            snake.segments.forEach(segment => {
+                context.fillRect(segment.x, segment.y, gridSize - 1, gridSize - 1);
+                if (snake.invincible) {
+                    context.strokeRect(segment.x, segment.y, gridSize - 1, gridSize - 1);
+                }
+            });
+        });
+    }
+
+    // Draw cock shape
+    function drawCockShape() {
+        context.beginPath();
+        context.fillStyle = '#FFA500'; // Orange color for the cock
+
+        // Body
+        context.ellipse(0, 0, gridSize / 2 - 2, gridSize / 2 - 4, 0, 0, 2 * Math.PI);
+        context.fill();
+
+        // Comb
+        context.beginPath();
+        context.fillStyle = '#FF4500'; // Red color for the comb
+        context.arc(-gridSize / 4, -gridSize / 2 + 4, 4, 0, Math.PI, true);
+        context.arc(0, -gridSize / 2 + 6, 4, 0, Math.PI, true);
+        context.arc(gridSize / 4, -gridSize / 2 + 4, 4, 0, Math.PI, true);
+        context.fill();
+
+        // Beak
+        context.beginPath();
+        context.fillStyle = '#FFD700'; // Gold color for the beak
+        context.moveTo(0, -2);
+        context.lineTo(gridSize / 2 - 2, 0);
+        context.lineTo(0, 2);
+        context.closePath();
+        context.fill();
+
+        // Eye
+        context.beginPath();
+        context.fillStyle = '#000';
+        context.arc(-gridSize / 4, -gridSize / 4, 2, 0, 2 * Math.PI);
+        context.fill();
+    }
+
+    // Change snake direction based on key press
+    function changeDirection(event) {
+        const snake = snakes[playerIndex];
+        const keyPressed = event.key.toLowerCase();
+
+        if (keyPressed === 'a' && snake.direction.x !== 1) {
+            snake.nextDirection = { x: -1, y: 0 };
+        } else if (keyPressed === 'w' && snake.direction.y !== 1) {
+            snake.nextDirection = { x: 0, y: -1 };
+        } else if (keyPressed === 'd' && snake.direction.x !== -1) {
+            snake.nextDirection = { x: 1, y: 0 };
+        } else if (keyPressed === 's' && snake.direction.y !== -1) {
+            snake.nextDirection = { x: 0, y: 1 };
+        }
+        sendDirectionUpdate(snake.nextDirection);
+    }
+
+    // Place food at a random position
+    function placeFood() {
+        const food = {
+            x: Math.floor(Math.random() * (canvas.width / gridSize)) * gridSize,
+            y: Math.floor(Math.random() * (canvas.height / gridSize)) * gridSize
+        };
+
+        foods.push(food);
+    }
+
+    // Place cock at a random position
+    function placeCock() {
+        cock.x = Math.floor(Math.random() * (canvas.width / gridSize)) * gridSize;
+        cock.y = Math.floor(Math.random() * (canvas.height / gridSize)) * gridSize;
+    }
+
+    // Move cock randomly
+    function moveCock() {
+        const possibleMoves = [
+            { x: 0, y: -1 }, // Up
+            { x: 1, y: 0 },  // Right
+            { x: 0, y: 1 },  // Down
+            { x: -1, y: 0 }  // Left
+        ];
+
+        const move = possibleMoves[Math.floor(Math.random() * possibleMoves.length)];
+
+        cock.x += move.x * gridSize;
+        cock.y += move.y * gridSize;
+
+        // Wrap around the canvas edges
+        cock.x = (cock.x + canvas.width) % canvas.width;
+        cock.y = (cock.y + canvas.height) % canvas.height;
+    }
+
+    // Spawn special food
+    function spawnSpecialFood() {
+        const specialFood = {
+            x: Math.floor(Math.random() * (canvas.width / gridSize)) * gridSize,
+            y: Math.floor(Math.random() * (canvas.height / gridSize)) * gridSize
+        };
+
+        specialFoods.push(specialFood);
+
+        // Special food disappears after some time
+        setTimeout(() => {
+            const index = specialFoods.indexOf(specialFood);
+            if (index !== -1) {
+                specialFoods.splice(index, 1);
+            }
+        }, 8000);
+
+        // Spawn next special food
+        setTimeout(spawnSpecialFood, 20000);
+    }
+
+    // Spawn abilities
+    function spawnAbility() {
+        const abilityTypes = [
+            { name: 'Invincible', effect: 'Become invincible for 5 seconds.' },
+            { name: 'Speed Up', effect: 'Increase speed for 5 seconds.' },
+            { name: 'Slow Down', effect: 'Decrease speed for 5 seconds.' }
+        ];
+        const ability = {
+            x: Math.floor(Math.random() * (canvas.width / gridSize)) * gridSize,
+            y: Math.floor(Math.random() * (canvas.height / gridSize)) * gridSize,
+            ...abilityTypes[Math.floor(Math.random() * abilityTypes.length)]
+        };
+
+        abilities.push(ability);
+
+        // Ability disappears after some time
+        setTimeout(() => {
+            const index = abilities.indexOf(ability);
+            if (index !== -1) {
+                abilities.splice(index, 1);
+            }
+        }, 10000);
+
+        // Spawn next ability
+        setTimeout(spawnAbility, 15000);
+    }
+
+    // Activate ability
+    function activateAbility(ability, snake) {
+        showMessage(`Ability Activated: ${ability.name} - ${ability.effect}`);
+        if (ability.name === 'Invincible') {
+            snake.invincible = true;
+            snake.abilityActive = 'Invincible';
+            setTimeout(() => {
+                snake.invincible = false;
+                snake.abilityActive = null;
+            }, 5000);
+        } else if (ability.name === 'Speed Up') {
+            speed -= 20;
+            if (speed < 50) speed = 50;
+            clearInterval(window.gameInterval);
+            window.gameInterval = setInterval(gameLoop, speed);
+            setTimeout(() => {
+                speed += 20;
+                clearInterval(window.gameInterval);
+                window.gameInterval = setInterval(gameLoop, speed);
+            }, 5000);
+        } else if (ability.name === 'Slow Down') {
+            speed += 20;
+            clearInterval(window.gameInterval);
+            window.gameInterval = setInterval(gameLoop, speed);
+            setTimeout(() => {
+                speed -= 20;
+                clearInterval(window.gameInterval);
+                window.gameInterval = setInterval(gameLoop, speed);
+            }, 5000);
+        }
+    }
+
+</script>
+</body>
+</html>
